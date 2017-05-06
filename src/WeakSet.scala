@@ -30,7 +30,6 @@ class WeakSet[T](initialCapacity: Int = DEFAULT_CAPACITY, loadFactor: Double = D
     entries.foreach(entry => addEntry(entry, getBucket(entry.hash)))
   }
 
-
   override def add(t: T): Unit = {
     cleanUp()
     requireNonNull(t)
@@ -57,24 +56,27 @@ class WeakSet[T](initialCapacity: Int = DEFAULT_CAPACITY, loadFactor: Double = D
   }
 
   private[this] def getHashAndBucket(t: T): (Int, Int) = {
-    val hash = t.hashCode()
+    val hash = calcHash(t.hashCode())
     (hash, getBucket(hash))
   }
 
-  private[this] def getBucket(hashCode: Int): Int = {
+  //applies a supplemental hash function to a given hashCode (copied from java.util.HashMap)
+  private[this] def calcHash(hashCode: Int) = {
     var hash = hashCode
-    //applies a supplemental hash function to a given hashCode (copied from java.util.HashMap)
     hash ^= hash >>> 20 ^ hash >>> 12
     hash ^= hash >>> 7 ^ hash >>> 4
+    hash
+  }
 
+  private[this] def getBucket(hash: Int): Int = {
     hash & (buckets.length - 1)
   }
 
-  private[this] def contains(t: T, hashCode: Int, bucket: Int): Boolean = {
+  private[this] def contains(t: T, hash: Int, bucket: Int): Boolean = {
     @tailrec
     def contains(t: T, cur: Entry): Boolean = cur match {
       case null => false
-      case e: Entry => e.hash == hashCode && e.value == t || contains(t, e.next)
+      case e: Entry => e.hash == hash && e.value == t || contains(t, e.next)
     }
 
     contains(t, buckets(bucket))
