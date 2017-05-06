@@ -4,45 +4,54 @@ import WeakSet._
 
 import scala.annotation.tailrec
 
-class WeakSet[T] extends MySet[T] {
-  private[this] val initialCapacity = DEFAULT_SIZE
-  private[this] val loadFactor = DEFAULT_LOAD_FACTOR
-  private[this] val queue: ReferenceQueue[Any] = new ReferenceQueue[Any]
-  private[this] var buckets = Array.fill[Entry](initialCapacity)(Empty)
+class WeakSet[T](initialCapacity: Int = DEFAULT_CAPACITY, loadFactor: Double = DEFAULT_LOAD_FACTOR) extends MySet[T] {
+  require(initialCapacity >= 0, "initial capacity can't be negative")
+  require(loadFactor > 0 && loadFactor <= 1, "load factor should be between 0 and 1")
+
+  private[this] val queue: ReferenceQueue[Any] = new ReferenceQueue
+  private[this] var buckets = new Array[Entry](calculateCapacity)
   private[this] var size: Int = 0
   private[this] var usedBuckets: Int = 0
+  private[this] var threshold: Int = calculateThreshold
 
-  private[this] def resizeIfNeed() = {
-    if (usedBuckets >= buckets.length * loadFactor) {
-      usedBuckets = 0
-      val entries = buckets.flatMap(toList)
-      buckets = Array.fill[Entry](buckets.length * 2)(Empty)
-      entries.foreach(entry => addEntry(entry withBucket getBucket(entry.hash)))
-    }
+  private[this] def calculateCapacity: Int = {
+    var capacity = 1
+    while (capacity < initialCapacity) capacity *= 2
+    capacity
   }
+
+  private[this] def calculateThreshold: Int = (buckets.length * loadFactor).toInt
+
+  private[this] def resizeIfNeed() = if (usedBuckets >= threshold) {
+    usedBuckets = 0
+    val entries = buckets.flatMap(toList)
+    buckets = new Array[Entry](buckets.length * 2)
+    threshold = calculateThreshold
+    entries.foreach(entry => addEntry(entry, getBucket(entry.hash)))
+  }
+
 
   override def add(t: T): Unit = {
     cleanUp()
-    resizeIfNeed()
-    require(t != null, "value can't be null")
+    requireNonNull(t)
     val (hash, bucket) = getHashAndBucket(t)
     if (!contains(t, hash, bucket)) {
-      val entry = NonEmpty(hash, bucket)
-      addEntry(entry withValue weakWrap(t, entry))
+      val entry = new Entry(hash)
+      addEntry(entry withValue weakWrap(t, entry), bucket)
       size += 1
+      resizeIfNeed()
     }
   }
 
-  private[this] def addEntry(entry: NonEmpty): Unit = {
-    val entryInBucket = buckets(entry.bucket)
-    buckets(entry.bucket) = entry withNext entryInBucket
-    if (entryInBucket == Empty)
-      usedBuckets += 1
+  private[this] def addEntry(entry: Entry, bucket: Int): Unit = {
+    val entryInBucket = buckets(bucket)
+    buckets(bucket) = entry withNext entryInBucket
+    if (entryInBucket == null) usedBuckets += 1
   }
 
   override def contains(t: T): Boolean = {
     cleanUp()
-    require(t != null, "value can't be null")
+    requireNonNull(t)
     val (hash, bucket) = getHashAndBucket(t)
     contains(t, hash, bucket)
   }
@@ -52,40 +61,46 @@ class WeakSet[T] extends MySet[T] {
     (hash, getBucket(hash))
   }
 
-  private[this] def getBucket(hashCode: Int): Int = math.abs(hashCode % buckets.length)
+  private[this] def getBucket(hashCode: Int): Int = {
+    var hash = hashCode
+    //applies a supplemental hash function to a given hashCode (copied from java.util.HashMap)
+    hash ^= hash >>> 20 ^ hash >>> 12
+    hash ^= hash >>> 7 ^ hash >>> 4
+
+    hash & (buckets.length - 1)
+  }
 
   private[this] def contains(t: T, hashCode: Int, bucket: Int): Boolean = {
     @tailrec
     def contains(t: T, cur: Entry): Boolean = cur match {
-      case Empty => false
-      case NonEmpty(hash, b, next, value) => hash == hashCode && value == t || contains(t, next)
+      case null => false
+      case e: Entry => e.hash == hashCode && e.value == t || contains(t, e.next)
     }
 
     contains(t, buckets(bucket))
   }
 
-  private[this] def remove(bucket: Int)(p: NonEmpty => Boolean): Unit = {
+  private[this] def remove(bucket: Int)(p: Entry => Boolean): Unit = {
     @tailrec
-    def remove(prev: NonEmpty, cur: Entry): Unit = cur match {
-      case Empty =>
-      case entry: NonEmpty => if (p(entry)) {
+    def remove(prev: Entry, cur: Entry): Unit = cur match {
+      case null => ()
+      case entry: Entry => if (p(entry)) {
         prev.next = entry.next
         size -= 1
       } else remove(entry, entry.next)
     }
 
     buckets(bucket) match {
-      case Empty =>
-      case e: NonEmpty => if (p(e)) {
+      case null => ()
+      case e: Entry => if (p(e)) {
         buckets(bucket) = e.next
-        if (e.next == Empty)
-          usedBuckets -= 1
         size -= 1
+        if (e.next == null) usedBuckets -= 1
       } else remove(e, e.next)
     }
   }
 
-  private[this] def weakWrap(input: Any, entry: NonEmpty): Any = input match {
+  private[this] def weakWrap(input: Any, entry: Entry): Any = input match {
     case (x, y) => (weakWrap(x, entry), weakWrap(y, entry))
     case x => new MyWeakRef(x, queue, entry)
   }
@@ -94,29 +109,32 @@ class WeakSet[T] extends MySet[T] {
   private[this] def cleanUp(): Unit = {
     val ref = queue.poll().asInstanceOf[MyWeakRef[Any]]
     if (ref != null) {
-      remove(ref.entry.bucket)(ref.entry eq _)
+      remove(getBucket(ref.entry.hash))(ref.entry eq _)
       cleanUp()
     }
   }
 }
 
 object WeakSet {
-  private val DEFAULT_SIZE = 10
+  private val DEFAULT_CAPACITY = 16
   private val DEFAULT_LOAD_FACTOR = 0.75
 
-  private def toList(entry: Entry): List[NonEmpty] = {
+  private def toList(entry: Entry): List[Entry] = {
     @tailrec
-    def loop(entry: Entry, acc: List[NonEmpty]): List[NonEmpty] = entry match {
-      case Empty => acc
-      case e: NonEmpty => loop(e.next, e :: acc)
+    def loop(entry: Entry, acc: List[Entry]): List[Entry] = entry match {
+      case null => acc
+      case e: Entry => loop(e.next, e :: acc)
     }
 
     loop(entry, List())
   }
 
-  private class Entry
+  private def requireNonNull(value: Any) = if (value == null) throw new NullPointerException("value can't be null")
 
-  private case class NonEmpty(hash: Int, var bucket: Int, var next: Entry = Empty, var value: Any = null) extends Entry {
+  private class Entry(val hash: Int) {
+    var next: Entry = _
+    var value: Any = _
+
     private[WeakSet] def withValue(value: Any) = {
       this.value = value
       this
@@ -126,16 +144,9 @@ object WeakSet {
       this.next = next
       this
     }
-
-    private[WeakSet] def withBucket(bucket: Int) = {
-      this.bucket = bucket
-      this
-    }
   }
 
-  private object Empty extends Entry
-
-  private class MyWeakRef[T](t: T, queue: ReferenceQueue[T], val entry: NonEmpty) extends WeakReference[T](t, queue) {
+  private class MyWeakRef[T](t: T, queue: ReferenceQueue[T], val entry: Entry) extends WeakReference[T](t, queue) {
     /**
       * Not symmetric!! Only for internal usage
       */
