@@ -108,12 +108,12 @@ class WeakSet[T](initialCapacity: Int = DEFAULT_CAPACITY, loadFactor: Double = D
   }
 
   @tailrec
-  private[this] def cleanUp(): Unit = {
-    val ref = queue.poll().asInstanceOf[MyWeakRef[Any]]
-    if (ref != null) {
-      remove(getBucket(ref.entry.hash))(ref.entry eq _)
+  private[this] def cleanUp(): Unit = Option(queue.poll().asInstanceOf[MyWeakRef[Any]]).map(_.entry) match {
+    case None => ()
+    case Some(entry) if entry.value == null => cleanUp()
+    case Some(entry) => remove(getBucket(entry.hash))(entry eq _)
+      entry.value = null
       cleanUp()
-    }
   }
 }
 
